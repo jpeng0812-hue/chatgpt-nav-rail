@@ -1,0 +1,8 @@
+{
+  "port": 9333,
+  "autoRestart": true,
+  "restartCooldownSec": 600,
+  "restartGraceSec": 2,
+  "restartOnlyWhenBackgrounded": true,
+  "_comment": "autoRestart=false => never touch the app (launch via our shortcut to get the port). restartGraceSec: only attach after the app has been stable this long. restartOnlyWhenBackgrounded: only swap while ChatGTP is not in the foreground, so you never see a flash."
+}
