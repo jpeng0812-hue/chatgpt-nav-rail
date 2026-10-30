@@ -91,6 +91,37 @@ function appRunning() {
   });
 }
 
+/**
+ * 事件驱动的启动检测：应用启动时会在 profile 目录里创建 lockfile。
+ * 用 fs.watch 监听它，比每 6 秒一次 tasklist 快一个数量级（~50ms 级），
+ * 也让"接管"发生在窗口还没画出来的时候 —— 闪退感几乎消失。
+ */
+let profileWatcher = null;
+function startProfileWatcher() {
+  if (profileWatcher) return;
+  try {
+    const base = path.join(process.env.LOCALAPPDATA || '', 'Packages');
+    const pkgs = fs.readdirSync(base).filter((d) => d.startsWith('OpenAI.Codex_'));
+    for (const pkg of pkgs) {
+      const dir = path.join(base, pkg, 'LocalCache', 'Roaming', 'Codex', 'web', 'Codex');
+      if (!fs.existsSync(dir)) continue;
+      const lockPath = path.join(dir, 'lockfile');
+      profileWatcher = fs.watch(dir, { persistent: true }, async (_ev, name) => {
+        const n = String(name || '').toLowerCase();
+        if (n.indexOf('lock') < 0) return;
+        if (!fs.existsSync(lockPath)) return;        // 删除事件 = 正在退出，忽略
+        if (await portOpen(PORT)) return;            // 已经带端口，无需动作
+        if (!CFG.autoRestart) return;
+        attach('lockfile appeared (app booting)');
+      });
+      log('profile watcher on ' + dir);
+      return;
+    }
+    log('profile watcher: no Codex profile dir found');
+  } catch (e) {
+    log('profile watcher failed: ' + e.message);
+  }
+}
 const readNum = (f) => {
   try { return Number(fs.readFileSync(f, 'utf8').trim()) || 0; } catch { return 0; }
 };
@@ -98,6 +129,32 @@ const readNum = (f) => {
 let misses = 0;
 let lastAppCheck = 0;   // 应用存在性检查（tasklist）的最小间隔，降低空闲开销
 
+const LAUNCHER_LOG = path.join(STATE, 'launcher.log');
+
+/** 发起一次"换成带端口启动"的接管：节流 + 记录 + 拉起启动器 */
+function attach(reason) {
+  const now = Date.now();
+  // 刚尝试过就歇 20 秒：应用重启过程中状态会抖动，否则会被误判成"新实例"而反复杀
+  if (now - readNum(LAST_SWAP) < 20000) return false;
+  try {
+    fs.writeFileSync(LAST_SWAP, String(now));
+  } catch {}
+  log(`attach (${reason}) -> debug-port launch`);
+
+  // 注意：不要用 detached:true —— Windows 上它是 DETACHED_PROCESS（无控制台），
+  // 在这种进程里做 AUMID 激活会静默失败（表现为"拉了启动器但应用没带端口"）。
+  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const out = fs.openSync(LAUNCHER_LOG, 'a');
+  const child = spawn(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'launch.ps1')], {
+    detached: false,
+    stdio: ['ignore', out, out],
+    windowsHide: true,
+  });
+  child.on('error', (e) => log('spawn launcher failed:', e.message));
+  child.on('exit', (code) => log(`launcher exited code=${code}`));
+  child.unref();
+  return true;
+}
 async function tick() {
   const now = Date.now();
   const open = await portOpen(PORT);
@@ -137,24 +194,11 @@ async function tick() {
   // 刚尝试过就歇 20 秒：应用重启过程中进程数会抖动（<5），否则会被误判成"又出现了"而反复杀。
   if (now - readNum(LAST_SWAP) < 20000) return;
   try { fs.writeFileSync(ATTEMPTED, String(seenAt)); } catch {}
-  try { fs.writeFileSync(LAST_SWAP, String(now)); } catch {}
-  log(`app is fresh (${Math.round((now - seenAt) / 1000)}s) -> switching it to a debug-port launch`);
-  try { fs.unlinkSync(SEEN_AT); } catch {}
-  // 用绝对路径调用 PowerShell：从 wscript→node 这种环境里，裸 "powershell.exe" 可能解析不到，
-  // 之前就是因为这个 spawn 静默失败，导致"检测到但没有真正切换"。
-  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  // 注意：不要用 detached:true —— Windows 上它会创建 DETACHED_PROCESS（无控制台），
-  // 在这种进程里做 AUMID 激活会失败，表现为"拉了启动器但应用没带上端口"。
-  const out = fs.openSync(path.join(STATE, 'launcher.log'), 'a');
-  const child = spawn(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'launch.ps1')], {
-    detached: false, stdio: ['ignore', out, out], windowsHide: true,
-  });
-  child.on('error', (e) => log('spawn launcher failed:', e.message));
-  child.on('exit', (code) => log(`launcher exited code=${code}`));
-  child.unref();
-  log(`launcher spawned pid=${child.pid}`);
+  attach(`fresh instance (${Math.round((now - seenAt) / 1000)}s)`);
+  return;
 }
 
 log(`supervisor started (node ${process.versions.node}, port=${PORT}, autoRestart=${!!CFG.autoRestart})`);
+startProfileWatcher();
 tick();
 setInterval(tick, TICK_MS);

@@ -8,7 +8,8 @@
 [CmdletBinding()]
 param(
     [int]$Port = 0,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$Hidden   # 预启动：窗口一出现就隐藏（不弹窗、不占任务栏）
 )
 
 $ErrorActionPreference = 'Continue'
@@ -131,6 +132,48 @@ if (-not $daemonPid) {
     if (-not (Start-Daemon)) { exit 1 }
 } else {
     Write-Log "injector already running (pid $daemonPid)"
+}
+
+# ---- 3. 预启动模式：把窗口隐藏（点图标即唤醒，不会重启） ----
+if ($Hidden) {
+    if (-not ('NavHide' -as [type])) {
+        Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class NavHide {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  public static IntPtr FindChat(uint[] pids) {
+    IntPtr best = IntPtr.Zero;
+    EnumWindows((h,l) => {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (Array.IndexOf(pids, pid) < 0 || !IsWindowVisible(h)) return true;
+      var t = new StringBuilder(256); GetWindowTextW(h, t, 256);
+      if (t.ToString() == "ChatGPT") { best = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return best;
+  }
+}
+"@ -ErrorAction SilentlyContinue
+    }
+    for ($i = 0; $i -lt 200; $i++) {
+        $ids = @((Get-Process ChatGPT -ErrorAction SilentlyContinue).Id)
+        if ($ids.Count -gt 0) {
+            $hwnd = [NavHide]::FindChat($ids)
+            if ($hwnd -ne [IntPtr]::Zero) {
+                [NavHide]::ShowWindow($hwnd, 0) | Out-Null   # SW_HIDE
+                Write-Log 'preload: window hidden (click any ChatGPT icon to bring it up)'
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 150
+    }
 }
 
 Write-Log "OK: nav rail active on port $Port"
