@@ -1,6 +1,6 @@
 {
   "port": 9333,
-  "autoRestart": true,
+  "autoRestart": false,
   "restartCooldownSec": 600,
   "restartGraceSec": 2,
   "restartOnlyWhenBackgrounded": true,

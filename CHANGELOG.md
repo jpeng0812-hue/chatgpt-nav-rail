@@ -1,3 +1,8 @@
+## 3.3.1
+
+- 修复看护在"冷却期恰好覆盖启动窗口"时永久错过接管（改为**每个实例只尝试一次**，不再按时间冷却）
+- 修复从 wscript→node 拉起 PowerShell 时 `powershell.exe` 解析失败导致"检测到但没切换"（改用绝对路径 + 错误日志）
+- `autoRestart` 默认改为 `false`：默认绝不主动结束 ChatGPT；需要自动接管时再开启
 # Changelog
 
 ## 3.3.0

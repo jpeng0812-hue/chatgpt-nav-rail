@@ -22,6 +22,7 @@ const LOG = path.join(STATE, 'supervisor.log');
 const PIDFILE = path.join(STATE, 'daemon.pid');
 const SEEN_AT = path.join(STATE, 'app-seen-at.txt');
 const LAST_SWAP = path.join(STATE, 'last-restart.txt');
+const ATTEMPTED = path.join(STATE, 'attempted-instance.txt');
 
 const CFG_PATH = path.join(HERE, 'config.json');
 let CFG = { port: 9333, autoRestart: true, restartGraceSec: 2, restartCooldownSec: 120 };
@@ -31,7 +32,7 @@ try {
 
 const PORT = Number(CFG.port) || 9333;
 const TICK_MS = 2000;
-const FRESH_MS = 90 * 1000; // 90 秒内出现的应用视为"刚启动"
+const FRESH_MS = 5 * 60 * 1000; // 5 分钟内出现的应用仍可尝试接管
 
 const log = (...a) => {
   try { fs.appendFileSync(LOG, `[${new Date().toISOString()}] ${a.join(' ')}\n`); } catch {}
@@ -124,19 +125,24 @@ async function tick() {
   }
 
   if (!CFG.autoRestart) return;
-  const fresh = now - seenAt < FRESH_MS;
-  if (!fresh) return; // 老实例不打扰
+  if (now - seenAt >= FRESH_MS) return; // 跑了很久的老实例不打扰
 
-  const cooldown = Number(CFG.restartCooldownSec) * 1000;
-  if (now - readNum(LAST_SWAP) < cooldown) return;
-
+  // 关键：每个"实例"只尝试一次，而不是按时间冷却。
+  // 否则冷却期正好覆盖了"刚启动"窗口，就会永久错过（这正是之前又失效的原因）。
+  if (readNum(ATTEMPTED) === seenAt) return;
+  try { fs.writeFileSync(ATTEMPTED, String(seenAt)); } catch {}
   try { fs.writeFileSync(LAST_SWAP, String(now)); } catch {}
   log(`app is fresh (${Math.round((now - seenAt) / 1000)}s) -> switching it to a debug-port launch`);
   try { fs.unlinkSync(SEEN_AT); } catch {}
-  const p = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'launch.ps1'), '-Quiet'], {
+  // 用绝对路径调用 PowerShell：从 wscript→node 这种环境里，裸 "powershell.exe" 可能解析不到，
+  // 之前就是因为这个 spawn 静默失败，导致"检测到但没有真正切换"。
+  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const child = spawn(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'launch.ps1'), '-Quiet'], {
     detached: true, stdio: 'ignore', windowsHide: true,
   });
-  p.unref();
+  child.on('error', (e) => log('spawn launcher failed:', e.message));
+  child.unref();
+  log(`launcher spawned pid=${child.pid}`);
 }
 
 log(`supervisor started (node ${process.versions.node}, port=${PORT}, autoRestart=${!!CFG.autoRestart})`);
