@@ -13,6 +13,8 @@
 ChatGPT 桌面端的 Chat 模式里，长对话翻起来很累：想回到某个提问，只能一路往上滚。这个项目在正文左侧加了一条极简导航——**只对应你提的问题**，悬停出摘要，点击直达。
 
 ---
+当然桌面端本身的work和codex模式都有导航，而chat直接在网页端使用效果其实会比桌面端好。然后下载插件[AI-MarkDone](https://github.com/zhaoliangbin42/AI-MarkDone)可以生成网页端chat的导航栏。
+这也是一种解决办法。
 
 ## Features
 
