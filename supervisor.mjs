@@ -139,10 +139,14 @@ async function tick() {
   // 用绝对路径调用 PowerShell：从 wscript→node 这种环境里，裸 "powershell.exe" 可能解析不到，
   // 之前就是因为这个 spawn 静默失败，导致"检测到但没有真正切换"。
   const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const child = spawn(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'launch.ps1'), '-Quiet'], {
-    detached: true, stdio: 'ignore', windowsHide: true,
+  // 注意：不要用 detached:true —— Windows 上它会创建 DETACHED_PROCESS（无控制台），
+  // 在这种进程里做 AUMID 激活会失败，表现为"拉了启动器但应用没带上端口"。
+  const out = fs.openSync(path.join(STATE, 'launcher.log'), 'a');
+  const child = spawn(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'launch.ps1')], {
+    detached: false, stdio: ['ignore', out, out], windowsHide: true,
   });
   child.on('error', (e) => log('spawn launcher failed:', e.message));
+  child.on('exit', (code) => log(`launcher exited code=${code}`));
   child.unref();
   log(`launcher spawned pid=${child.pid}`);
 }

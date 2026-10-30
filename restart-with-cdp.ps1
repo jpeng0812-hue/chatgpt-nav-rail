@@ -1,10 +1,11 @@
 ﻿<#
-  restart-with-cdp.ps1  ---  干净重启 ChatGPT 桌面端并开启 Chromium 远程调试端口。
+  restart-with-cdp.ps1 -- 干净重启 ChatGPT 并开启 Chromium 远程调试端口。
 
-  背景：ChatGPT(Codex) 桌面端是 MSIX 打包的 Electron 应用，且是单实例：
-       再启动一次只会把"开新窗口"转发给主实例，命令行开关无法传入。
-       所以必须在主进程完全退出后，用 AUMID 激活并带上 --remote-debugging-port。
-       AUMID 由签名证书派生（OpenAI.Codex_2p2nqsd0c76g0!App），跨版本稳定。
+  要点：
+    1. MSIX 应用是单实例：必须先让旧实例真正退干净（0 内存的僵尸条目不算），
+       否则 AUMID 激活会被旧实例接走，新实例就不带 --remote-debugging-port。
+    2. 用 AUMID 激活（跨版本稳定），不用带版本号的路径。
+    3. 激活后端口没开就再清一次、再激活，最多 3 轮。
 #>
 [CmdletBinding()]
 param(
@@ -16,23 +17,24 @@ $ErrorActionPreference = 'Continue'
 
 function Get-ChatGPTAumid {
     $sh = New-Object -ComObject Shell.Application
-    $item = $sh.NameSpace('shell:AppsFolder').Items() |
-        Where-Object { $_.Name -eq 'ChatGPT' } |
-        Select-Object -First 1
+    $item = $sh.NameSpace('shell:AppsFolder').Items() | Where-Object { $_.Name -eq 'ChatGPT' } | Select-Object -First 1
     if (-not $item) { throw 'shell:AppsFolder 中找不到 ChatGPT' }
     return $item.Path
 }
 
 function Test-CdpPort([int]$p) {
+    $client = New-Object System.Net.Sockets.TcpClient
     try {
-        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$p/json/version" -TimeoutSec 2
-        return [bool]$r.webSocketDebuggerUrl
-    } catch { return $false }
+        $iar = $client.BeginConnect('127.0.0.1', $p, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne(600)) { return $false }
+        $client.EndConnect($iar)
+        return $true
+    } catch { return $false } finally { $client.Close() }
 }
 
 function Stop-ChatGPT {
     for ($round = 0; $round -lt 8; $round++) {
-        $procs = @(Get-Process ChatGPT -ErrorAction SilentlyContinue)
+        $procs = @(Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { $_.WorkingSet64 -gt 0 })
         if ($procs.Count -eq 0) { return }
         if ($round -eq 0) {
             foreach ($p in $procs) { try { $p.CloseMainWindow() | Out-Null } catch {} }
@@ -43,10 +45,6 @@ function Stop-ChatGPT {
             catch { Write-Output ("  无法结束 PID {0}: {1}" -f $p.Id, $_.Exception.Message) }
         }
         Start-Sleep -Seconds 1
-    }
-    $left = @(Get-Process ChatGPT -ErrorAction SilentlyContinue)
-    if ($left.Count -gt 0) {
-        Write-Output ("警告：仍有 {0} 个 ChatGPT 进程无法结束，继续尝试激活" -f $left.Count)
     }
 }
 
@@ -81,35 +79,53 @@ Add-Type -TypeDefinition $src -ErrorAction SilentlyContinue
 $aumid = Get-ChatGPTAumid
 Write-Output "AUMID: $aumid"
 
+# 1) 让旧实例彻底退出
 Stop-ChatGPT
+for ($w = 0; $w -lt 40; $w++) {
+    $left = @(Get-Process ChatGPT -ErrorAction SilentlyContinue | Where-Object { $_.WorkingSet64 -gt 0 })
+    if ($left.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 500
+}
 Write-Output '旧实例已退出。'
 
 $launchArgs = "--remote-debugging-port=$Port"
-$launched = $false
-try {
-    $newPid = [Aam]::Activate($aumid, $launchArgs)
-    Write-Output "已通过 AUMID 激活（保留 MSIX 身份），PID=$newPid"
-    $launched = $true
-} catch {
-    Write-Output "AUMID 激活失败：$($_.Exception.Message)"
-}
 
-if (-not $launched) {
-    $root = 'C:\Program Files\WindowsApps'
-    $found = Get-ChildItem $root -Directory -Filter 'OpenAI.Codex_*' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $found) { throw '找不到 ChatGPT 安装目录' }
-    $bin = Join-Path $found.FullName 'app\ChatGPT.exe'
-    Write-Output "兜底直启：$bin"
-    Start-Process -FilePath $bin -ArgumentList $launchArgs
-}
-
-for ($i = 0; $i -lt 90; $i++) {
-    if (Test-CdpPort $Port) {
-        Write-Output "CDP 端口 $Port 已就绪"
-        $list = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -TimeoutSec 5
-        $list | ForEach-Object { Write-Output ("target: type={0}  title={1}  url={2}" -f $_.type, $_.title, $_.url) }
-        exit 0
+function Invoke-Activation([string]$id, [string]$arguments) {
+    try {
+        $newPid = [Aam]::Activate($id, $arguments)
+        Write-Output "已通过 AUMID 激活（保留 MSIX 身份），PID=$newPid"
+        return $true
+    } catch {
+        Write-Output "AUMID 激活失败：$($_.Exception.Message)"
+        return $false
     }
-    Start-Sleep -Milliseconds 500
 }
-throw "等待 CDP 端口 $Port 超时"
+
+# 2) 激活 + 等端口；失败就再来一轮（最多 3 轮）
+$ready = $false
+for ($attempt = 1; $attempt -le 3 -and -not $ready; $attempt++) {
+    if (-not (Invoke-Activation $aumid $launchArgs)) {
+        $found = Get-ChildItem 'C:\Program Files\WindowsApps' -Directory -Filter 'OpenAI.Codex_*' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) {
+            $bin = Join-Path $found.FullName 'app\ChatGPT.exe'
+            Write-Output "兜底直启：$bin"
+            Start-Process -FilePath $bin -ArgumentList $launchArgs
+        }
+    }
+    for ($i = 0; $i -lt 60; $i++) {
+        if (Test-CdpPort $Port) { $ready = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $ready -and $attempt -lt 3) {
+        Write-Output "第 $attempt 轮未就绪，清理后重试…"
+        Stop-ChatGPT
+        Start-Sleep -Seconds 2
+    }
+}
+
+if (-not $ready) { throw "等待 CDP 端口 $Port 超时" }
+
+Write-Output "CDP 端口 $Port 已就绪"
+$list = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/list" -TimeoutSec 5
+$list | ForEach-Object { Write-Output ("target: type={0}  title={1}  url={2}" -f $_.type, $_.title, $_.url) }
+exit 0
