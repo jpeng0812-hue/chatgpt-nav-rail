@@ -96,8 +96,10 @@ const readNum = (f) => {
 };
 
 let misses = 0;
+let lastAppCheck = 0;   // 应用存在性检查（tasklist）的最小间隔，降低空闲开销
 
 async function tick() {
+  const now = Date.now();
   const open = await portOpen(PORT);
 
   if (open) {
@@ -110,13 +112,15 @@ async function tick() {
   misses++;
   if (misses >= 2 && daemonAlive()) stopDaemon();
 
+  // 端口不在时才需要问"应用在不在"；tasklist 会起子进程，所以最多每 6 秒问一次
+  if (now - lastAppCheck < 6000) return;
+  lastAppCheck = now;
   if (!(await appRunning())) {
     try { fs.unlinkSync(SEEN_AT); } catch {}
     return;
   }
 
   // 应用在跑但没有端口
-  const now = Date.now();
   let seenAt = readNum(SEEN_AT);
   if (!seenAt) {
     seenAt = now;
