@@ -130,6 +130,8 @@ async function tick() {
   // 关键：每个"实例"只尝试一次，而不是按时间冷却。
   // 否则冷却期正好覆盖了"刚启动"窗口，就会永久错过（这正是之前又失效的原因）。
   if (readNum(ATTEMPTED) === seenAt) return;
+  // 刚尝试过就歇 20 秒：应用重启过程中进程数会抖动（<5），否则会被误判成"又出现了"而反复杀。
+  if (now - readNum(LAST_SWAP) < 20000) return;
   try { fs.writeFileSync(ATTEMPTED, String(seenAt)); } catch {}
   try { fs.writeFileSync(LAST_SWAP, String(now)); } catch {}
   log(`app is fresh (${Math.round((now - seenAt) / 1000)}s) -> switching it to a debug-port launch`);
