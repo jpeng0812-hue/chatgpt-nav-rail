@@ -4,7 +4,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)](#)
 [![ChatGPT Desktop](https://img.shields.io/badge/ChatGPT%20Desktop-Codex%20app-10a37f?logo=openai&logoColor=white)](#)
-[![Version](https://img.shields.io/badge/version-3.3.0-blue)](#changelog)
+[![Version](https://img.shields.io/badge/version-3.3.4-blue)](#changelog)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![No patch](https://img.shields.io/badge/app.asar-untouched-success)](#why-not-patch-the-app)
 
@@ -189,3 +189,23 @@ node tools\regress.mjs         # 多会话回归：用户气泡数 vs 刻度数
 ## License
 
 [MIT](LICENSE)
+
+## Autostart & overhead
+
+登录时只自启**看护进程**（`supervisor.mjs`），不自启 ChatGPT 本体。实测（Windows 11，32 逻辑核）：
+
+| 组件 | CPU（稳态） | 内存 | 职责 |
+|---|---|---|---|
+| supervisor | ChatGPT 开着 **0.000%**；关着 **0.16%**（≈整机 0.005%） | **40 MB** | 2s 一次本机 TCP 探测；只在端口关闭时才每 6s `tasklist` 一次 |
+| injector | **0.19%**（单核） | **58 MB** | 3s 扫一次 CDP 目标；页面内 1s 节拍，窗口不可见即停表 |
+| ChatGPT 本体（对比） | — | **≈3 GB** | 真正的大头 |
+
+所以"开机自启"的代价是 **40 MB + 几乎为零的 CPU**；真正占资源的是 ChatGPT。
+
+- 想再省：`config.json` 里 `autoRestart: false` —— 看护连 `tasklist` 都不再调用，空闲只剩 TCP 探测（≈0.01% 单核）。
+- 关闭 ChatGPT 后注入器 2 秒内自动退出，看护继续待命；再次打开时会自动接上（见 `supervisor.log`）。
+
+### 自动接管的两次踩坑（已在 3.3.3/3.3.4 修复）
+
+1. `spawn(..., { detached: true })` 在 Windows 上创建 **DETACHED_PROCESS（无控制台）**，这种进程里做 AUMID 激活会静默失败 → 表现为"检测到了、也拉了启动器，应用就是没带端口"。改为普通子进程后恢复。
+2. 应用重启瞬间进程数会短暂低于阈值，被误判为"新实例" → 反复尝试。加 20s 静默期 + 每实例只尝试一次。

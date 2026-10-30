@@ -15,12 +15,6 @@ $Cmd = Join-Path $Here 'Start-ChatGPT-Nav.cmd'
 $Vbs = Join-Path $Here 'supervisor-hidden.vbs'
 $Name = 'ChatGPT (消息导航栏)'
 
-# 首次安装：从示例生成 config.json
-$cfg = Join-Path $Here 'config.json'
-if (-not (Test-Path $cfg)) {
-    Copy-Item (Join-Path $Here 'config.example.json') $cfg -Force
-    Write-Host "config: created from config.example.json"
-}
 $shell = New-Object -ComObject WScript.Shell
 $desktop = [Environment]::GetFolderPath('Desktop')
 $programs = [Environment]::GetFolderPath('Programs')
