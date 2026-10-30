@@ -18,7 +18,7 @@
  */
 (() => {
   const GLOBAL_KEY = '__chatgpt_nav_rail__';
-  const VERSION = '3.3.0';
+  const VERSION = '3.4.0';
 
   if (window[GLOBAL_KEY]) {
     if (window[GLOBAL_KEY].version === VERSION) {
@@ -65,7 +65,7 @@
     cardGap: 18,
     hoverDelay: 90,
     hideDelay: 200,
-    rescanDebounce: 140,
+    rescanDebounce: 60,
   };
 
   const q1 = (root, list) => {
@@ -110,6 +110,9 @@
     scrollerEl: null,
     suppressed: false,
     ticks: 0,
+    guardAt: 0,
+    title: '',
+    burst: [],
     guards: 0,
     guardTimer: 0,
     modeMo: null,
@@ -329,6 +332,24 @@
     );
   }
 
+  // 立刻让位（不等任何节流），用于"结构上已经确定是 Codex/官方轨道"的场景
+  function blockNow() {
+    if (!state.host) return;
+    if (!state.suppressed) {
+      state.suppressed = true;
+      hide();
+      renderHover(-1);
+    }
+    state.guardAt = performance.now();
+  }
+
+  // 节流的守卫：每 60ms 最多做一次完整判定（避免流式输出时每次都全量查询）
+  function guardNow() {
+    const now = performance.now();
+    if (now - state.guardAt < 60) return;
+    state.guardAt = now;
+    guardTick();
+  }
   // 300ms 级守卫：Codex/Work 或官方轨道一出现就立刻隐藏，不等 debounce
   function guardTick() {
     state.guards++;
@@ -344,11 +365,11 @@
     }
     if (state.suppressed) {
       state.suppressed = false;
-      schedule(60);
+      measureSoon(true);
       return;
     }
     // 自愈：有会话容器但还没刻度（刚切会话/刚启动）时补一次测量
-    if (!state.items.length && q1(document, SELECTORS.scrollContainer)) schedule(200);
+    if (!state.items.length && q1(document, SELECTORS.scrollContainer)) measureSoon();
   }
 
   const frames = (n) =>
@@ -411,16 +432,22 @@
   }
 
   function pickScroller() {
+    const vh = window.innerHeight || document.documentElement.clientHeight || 800;
     const cands = [];
     for (const sel of SELECTORS.scrollContainer) {
       for (const el of document.querySelectorAll(sel)) {
         const r = el.getBoundingClientRect();
-        if (r.width > 200 && r.height > 150) cands.push({ el, h: el.clientHeight });
+        if (r.width <= 200 || r.height <= 150) continue;
+        if (!el.isConnected) continue;
+        // 关键：切会话后旧会话的容器可能还留在 DOM 里且尺寸不为 0，
+        // 只有"落在视口内的高度"才能区分哪个是当前正在看的。
+        const visibleH = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        cands.push({ el, h: el.clientHeight, vh: visibleH });
       }
       if (cands.length) break;
     }
     if (!cands.length) return null;
-    cands.sort((a, b) => b.h - a.h);
+    cands.sort((a, b) => b.vh - a.vh || b.h - a.h);
     return cands[0].el;
   }
 
@@ -799,34 +826,49 @@
     }
     if (ro) ro.disconnect();
     ro = new ResizeObserver(() => {
-      if (!state.items.length) schedule(120);
+      if (!state.items.length) measureSoon();
       else layout(true);
     });
     if (state.scroller) ro.observe(state.scroller);
 
     if (mo) mo.disconnect();
     mo = new MutationObserver((records) => {
+      // 每一批先做一次（60ms 节流的）守卫，保证 Codex / 官方轨道出现后一帧内就隐藏
+      guardNow();
+      // 节点被移除也要立刻重判：切回 Chat 时官方轨道/轮次节点会消失，不能等 600ms 节拍
+      if (records.some((r) => r.removedNodes && r.removedNodes.length)) guardNow();
+      let dirty = false;
       for (const r of records) {
         if (r.type !== 'childList') continue;
+        if (state.scroller && state.scroller.isConnected && state.scroller.contains(r.target)) dirty = true;
         for (const n of r.addedNodes) {
           if (n.nodeType !== 1) continue;
-          // 官方导航轨出现/消失：立刻守卫，不等 debounce
+          // 官方导航轨出现：立刻让位
           if (
             n.matches?.('[data-thread-user-message-navigation-rail-list]') ||
             n.querySelector?.('[data-thread-user-message-navigation-rail-list]')
           ) {
-            guardTick();
+            blockNow();
+            return;
+          }
+          // Codex 的轮次节点出现：不等查询，直接让位
+          if (
+            n.matches?.('[data-turn-key^="turn-"]') ||
+            n.querySelector?.('[data-turn-key^="turn-"]')
+          ) {
+            blockNow();
             return;
           }
           const hit =
             n.matches?.('[data-user-message-bubble], [data-turn-key]') ||
             n.querySelector?.('[data-user-message-bubble], [data-turn-key]');
           if (hit) {
-            schedule(150);
+            measureSoon();
             return;
           }
         }
       }
+      if (dirty) measureSoon();
     });
     mo.observe(document.body, { childList: true, subtree: true });
 
@@ -839,8 +881,38 @@
   }
 
   // 单一节拍：守卫 + 自愈，一起做（1s 一次，比原来 300ms+1500ms 两套省一半以上唤醒）
+  // 切换会话时连发重测：会话内容分几批渲染，单次 measure 往往抓不到足够消息
+  // 微任务合并：窗口被遮挡时 setTimeout 会被节流到秒级，MutationObserver 之后的测量必须走微任务
+  let microPending = false;
+  let lastMeasureAt = 0;
+  // force=true 用于"必须立刻反映"的场景（切会话、从 Codex 切回）；
+  // 普通调用做 120ms 节流，避免流式输出时每批 DOM 变更都全量重算。
+  function measureSoon(force) {
+    if (microPending) return;
+    microPending = true;
+    queueMicrotask(() => {
+      microPending = false;
+      const now = performance.now();
+      if (!force && state.items.length && now - lastMeasureAt < 120) return;
+      lastMeasureAt = now;
+      measure();
+    });
+  }
+  function scheduleBurst() {
+    if (state.burst) state.burst.forEach((h) => clearTimeout(h));
+    state.burst = [0, 60, 150, 320, 650].map((d) => setTimeout(() => measure(), d));
+  }
   function tick() {
     state.ticks++;
+    // 切会话：标题一变就立刻撤掉旧轨道，并连发重测（不等 600ms 节拍）
+    const titleNow = (document.title || "").trim();
+    if (titleNow !== state.title) {
+      state.title = titleNow;
+      hide();
+      renderHover(-1);
+      scheduleBurst();
+      measureSoon(true);
+    }
     guardTick();
     if (state.scroller && !state.scroller.isConnected) {
       state.scroller = null;
@@ -850,7 +922,7 @@
       ensureHost();
       schedule(60);
     }
-    if (!state.items.length && q1(document, SELECTORS.scrollContainer)) schedule(200);
+    if (!state.items.length && q1(document, SELECTORS.scrollContainer)) measureSoon();
     if (state.items.length && state.host && state.host.style.display === 'none') layout(true);
   }
 
@@ -861,7 +933,7 @@
   }
   function resume() {
     if (state.watchdog) return;
-    state.watchdog = setInterval(tick, 1000);
+    state.watchdog = setInterval(tick, 600);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') resume();
       else suspend();
@@ -881,7 +953,7 @@
       ensureHost();
       schedule(60);
     }
-    if (!state.items.length && q1(document, SELECTORS.scrollContainer)) schedule(200);
+    if (!state.items.length && q1(document, SELECTORS.scrollContainer)) measureSoon();
     if (state.items.length && state.host && state.host.style.display === 'none') layout(true);
   }
 
@@ -898,7 +970,7 @@
       },
       { passive: true }
     );
-    state.watchdog = setInterval(tick, 1000);
+    state.watchdog = setInterval(tick, 600);
     state.guardTimer = 0;
     schedule(400);
   }
