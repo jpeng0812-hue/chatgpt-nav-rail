@@ -1,9 +1,7 @@
-﻿# install.ps1 -- one-time setup: launcher shortcuts + background watchdog.
+﻿# install.ps1 -- one-time setup: logon preload + background watchdog.
 #
 # What it creates:
-#   %USERPROFILE%\Desktop\ChatGPT (消息导航栏).lnk
-#   %APPDATA%\Microsoft\Windows\Start Menu\Programs\ChatGPT (消息导航栏).lnk
-#   %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\ChatGPTNavRail.lnk  -> watch-hidden.vbs
+#   %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\ChatGPTNavRail.lnk  -> boot-hidden.vbs
 #
 # Run: powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 [CmdletBinding()]
@@ -31,11 +29,7 @@ function New-Shortcut([string]$Path, [string]$Target, [string]$Arguments, [int]$
     $lnk.Save()
 }
 
-# 1) launcher shortcuts (minimized console -> keeps a taskbar entry, no popup)
-New-Shortcut (Join-Path $desktop "$Name.lnk") $Cmd '' 7
-New-Shortcut (Join-Path $programs "$Name.lnk") $Cmd '' 7
-Write-Host "shortcut: $desktop\$Name.lnk"
-Write-Host "shortcut: $programs\$Name.lnk"
+# 1) launcher shortcuts removed (use the system icon; logon preload keeps the port ready)
 
 # 2) watchdog at logon
 if (-not $NoWatchdog) {
