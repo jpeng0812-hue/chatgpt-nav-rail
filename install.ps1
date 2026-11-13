@@ -43,4 +43,4 @@ if (-not $NoWatchdog) {
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Here 'launch.ps1')
 
 Write-Host ''
-Write-Host 'Done. Pin "ChatGPT (消息导航栏)" instead of the original ChatGPT icon.'
+Write-Host 'Done. ChatGPT is preloaded with the debug port at logon; just use your normal ChatGPT icon.'
